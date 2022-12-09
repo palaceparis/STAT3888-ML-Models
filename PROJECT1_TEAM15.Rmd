@@ -1,0 +1,1070 @@
+---
+title: "Project 1 Supplementary material"
+author: "Team 15"
+date: "11/11/2021"
+output:
+  bookdown::html_document2: 
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+    code_folding: hide
+    number_sections: true
+    theme: paper
+    highlight: kate
+    css: style.css
+link-citations: true
+nocite: "@*"
+---
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r setup, include=FALSE}
+# Default knitting options
+knitr::opts_chunk$set(echo=TRUE, # Echo the code
+                      tidy=TRUE, # Nicely dity up code
+                      warning=FALSE, # No warnings please 
+                      message=FALSE) # No messages please
+
+options(warn=-1)
+
+library(tidyverse)
+library(Hmisc)
+library(here)
+library(janitor)
+library(dplyr)       # for data wrangling
+library(ggplot2)     # for awesome plotting
+library(rpart)       # direct engine for decision tree application
+library(rpart.plot)  # for plotting decision trees
+library(vip)         # for feature importance
+library(pdp)         # for feature effects
+library(tidyr)
+library(janitor)
+library(mlbench)
+library(jtools)
+library(sandwich)
+library(ranger)   
+library(grid)
+library(glmnet)
+library(brglm)
+library(modelsummary)
+library(tidyr)
+library(mlbench)
+library(caret)
+library(here)
+library(equatiomatic)
+library(ggthemes)
+library(factoextra)
+library(knitr)
+library(kableExtra)
+library(neuralnet)
+library(sjPlot)
+library(sjmisc)
+library(sjlabelled)
+library(flextable)
+```
+
+**Note: All figure/table captions were added in Word. Only x/y title and some additional notes were created via codes.**
+
+# Load Data
+```{r}
+load(here("data", "dic_full.Rdata"))
+load(here("data", "tech_biom_john.Rdata"))
+load(here("data", "tech_food_john.Rdata"))
+load(here("data", "tech_nutr_john.Rdata"))
+load(here("data", "foodcode_class.Rdata"))
+```
+
+
+# Aims of analysis
+
+Around our research question, we built another three aims:
+  - Aim 1: Whether low SES groups consume more UPF compared to other SES groups
+  - Aim 2: Whether increased UPF ratio leads to lower protein and increased energy intake ratio among the low-SES group
+  - Aim 3: Whether UPF consumption is a significant contributor to obesity in low-SES groups
+  
+Answers from these three questions will make our final conclusion more persuasive. 
+
+Models in this analysis were mainly constructed for Aim 3. Firstly, the use of these models is to identify whether UPF consumption is significant in determining obesity. More importantly, the variable importance from the generated models (Classification trees, random forest, logistic regression and neutral networks) would be our criteria for confounding variables. We extracted important variables from each model and classified our data based on these confounding variables via K-means clustering to ensure that within each cluster, as UPF consumption increases, the effect of confounding variables on obesity could be removed.
+
+# Brief discussion of data
+
+We would use the three datasets provided by Professor John Ormerod as our technical data to conduct further analysis. 
+
+The biomedical dataset provides most of variables we would use in answering our research question. Our models were mainly built on biomedical dataset and another newly introduced variable, UPF consumption, which was mainly derived from food dataset that records every food volunteers ate during the experiment period. Basically, items in the food dataset were classified into 5 levels by NUTM students, i.e., unprocessed, minimally processed, processed culinary, processed and ultra-processed. We then calculated the proportion of each food class consumed by each person and extracted the proportion of consumed ultra-processed foods as the indicator of UPF consumption . 
+
+Also, since our research question is built around the topic of OBESITY, we then defined our version of obesity using variables from the biomedical dataset, the ratio of waist circumference to height according, which was highly recommended by the literature found by NUTM students.
+
+Definitely there are some inconsistencies embedded within technical datasets above but we would use them at this stage as a starting point and make necessary adjustments later. For instance, when we tried to  include a variable describing the time spent on physical activity during last week into logistic regression, we found it was a factor in the dataset though it should be numerical variables. Adjustments were then applied.
+
+# Define Obesity
+```{r}
+biom_whtr = tech_biom %>% mutate(
+  whtr = PHDCMWBC/PHDCMHBC
+)
+biom_obese = biom_whtr %>% mutate(OBESITY = case_when(
+  whtr>=0.53 & SEX=="1" ~ "OBESE",
+  whtr<0.53 & SEX=="1" ~ "NON-OBESE",
+  whtr>=0.49 & SEX=="2" ~ "OBESE",
+  whtr<0.49 & SEX=="2" ~ "NON-OBESE"
+))
+```
+
+# Proportion of different foods class 
+```{r}
+before_ratio_data = tibble(tech_food$ABSPID, tech_food$FOODCODC, foodcode_class$Class) %>% drop_na() %>% setNames(c("id", "food_code", "class"))
+before_ratio_data = before_ratio_data %>% group_by(id, class) %>% 
+  summarise(
+    count = n()
+  ) %>% 
+  ungroup()
+foodcode_class_ratio = before_ratio_data %>% group_by(id) %>%
+  summarise(
+    class = class,
+    ratio = count/sum(count)
+  )
+head(foodcode_class_ratio,10) %>% kbl(caption = "First 10 rows of foodcode_class_ratio") %>%
+  kable_classic(full_width = F) 
+```
+The food dataset was grouped by ID and five foods levels. Then the proportion of each level for each person was available.
+
+# Aim 1: Whether low-SES groups consume more UPF compared to other SES groups 
+```{r}
+colnames(foodcode_class_ratio)[1] = "ABSPID"
+foods_biom_comb = merge(x = foodcode_class_ratio, y = biom_obese, by = "ABSPID", all = TRUE)
+foods_biom_comb = foods_biom_comb %>% select(ABSPID, class, ratio, SF2SA1QN, OBESITY) %>% clean_names() 
+foods_biom_comb = foods_biom_comb %>% drop_na()
+foods_biom_comb = foods_biom_comb %>% filter(class == "Ultra-processed")
+high_ses = c("3", "4", "5")
+low_ses = c("1", "2")
+foods_biom_comb = foods_biom_comb %>% mutate(
+  new_ses = case_when(
+   sf2sa1qn %in% high_ses ~ "High SES",
+   sf2sa1qn %in% low_ses ~ "Low SES"
+  )
+)
+foods_biom_comb$new_ses = as.factor(foods_biom_comb$new_ses)
+
+ggplot()+
+  xlab("Proportion of UPF consumtion")+ 
+  theme_economist_white()+
+  theme(axis.title.y=element_blank(),
+        axis.title.x = element_text(color="Black", size=14, face="bold", vjust = -1),
+        axis.text.x = element_text(size = 10),
+        legend.title=element_blank(), 
+        plot.title = element_text(hjust = 0.5),
+        plot.caption.position = "plot",
+        plot.caption = element_text(hjust = 0, face= "italic", vjust = -3.5, colour = "#787272"))+
+  theme(panel.spacing = unit(2, "lines"))+
+  geom_density(
+    data = foods_biom_comb,
+    aes(x = ratio, y=..scaled.., group = new_ses, fill = new_ses),
+    alpha = 0.5
+  )+
+  facet_grid(. ~ obesity)+ 
+  geom_segment(data = data.frame(xint=0.5,obesity="OBESE"), 
+              mapping = aes(x=0.53, y=0, 
+                            xend=0.53, yend=0.58),
+              linetype='dotted',
+              color = 'red'
+  ) +
+  labs(caption = "Scaled Density Plot of Between-Group UPF Consumption")
+```
+
+UPF consumption for each person was extracted from previous foodcode_class_ratio dataframe. The figure was plotted for obese people and non-obese people. Within each group, we created a comparison between high SES people and low SES people. 
+
+# Aim 2: Whether increased UPF ratio leads to lower protein and increased energy intake ratio among the low-SES group (according to protein leverage hypothesis)
+```{r}
+temp1 = foods_biom_comb %>% select("abspid", "ratio", "obesity", "new_ses")
+temp2 = tech_nutr %>% select("ABSPID", "PROTT1", "ENERGYT1") %>% clean_names()
+p_l_h = merge(x = temp1, y = temp2, by = "abspid", all = TRUE) %>% filter(new_ses == "Low SES")
+```
+
+```{r}
+# plot
+ggplot(p_l_h, aes(x = ratio, y = prott1)) + 
+stat_smooth(method = "lm", col = "red")+
+theme_economist_white()+
+theme(legend.title=element_blank())+
+  xlab("Proportion of UPF consumption")+
+  ylab("Protein intake (g)")+
+theme(axis.title.x = element_text(vjust=-1, size = 20, face = "bold"), 
+      axis.title.y = element_text(vjust=3, size = 20, face = "bold"),
+      plot.title = element_text(vjust=2, size = 30, hjust = 0.5),
+      axis.text.x = element_text(size = 15),
+      plot.subtitle = element_text(size = 15, hjust = 0.5),
+      text = element_text(size=10),
+      plot.caption.position = "plot",
+      plot.caption = element_text(size = 13, hjust = 0, face= "italic", vjust = -3.5, colour = "#787272"))+
+  labs(
+    caption = "Relationship (smoothed) between UPF consumption and protein intake (first day)"
+  )
+
+ggplot(p_l_h, aes(x = ratio, y = energyt1)) + 
+stat_smooth(method = "lm", col = "red")+
+theme_economist_white()+
+theme(legend.title=element_blank())+
+  xlab("Proportion of UPF consumption")+
+  ylab("Energy intake (kj)")+
+theme(axis.title.x = element_text(vjust=-1, size = 20, face = "bold"), 
+      axis.title.y = element_text(vjust=3, size = 20, face = "bold"),
+      axis.text.x = element_text(size = 15),
+      plot.title = element_text(vjust=2, size = 30, hjust = 0.5),
+      plot.subtitle = element_text(size = 15, hjust = 0.5),
+      text = element_text(size=10),
+      plot.caption.position = "plot",
+      plot.caption = element_text(size =13, hjust = 0, face= "italic", vjust = -3.5, colour = "#787272"))+
+  labs(
+    caption = "Relationship (smoothed) between UPF consumption and energy intake (first day)"
+  )
+# ggsave(file="aim2-2.png", width=12, height=7, dpi=300)
+```
+
+A smoothed density plot was plotted respectively between protein intake and UPF consumption and energy intake and UPF consumption. Note that the protein and energy intake are all from the first day. Data from the second day was dropped because we found many outliers from that day and it is not trustworthy.
+
+# Aim 3: Whether UPF consumption is a significant contributor to obesity in low-SES groups
+
+## Before building models
+```{r}
+foods_obesity = spread(foodcode_class_ratio, key = class, value = ratio) %>% mutate_all(~replace(., is.na(.), 0)) %>% clean_names()
+biom_obese = biom_obese %>% clean_names() 
+biom_obese$"ultra_processed"= foods_obesity$ultra_processed
+biom_obese$exlwmbc = as.numeric(biom_obese$exlwmbc)
+biom_obese$exlwtbc = as.numeric(biom_obese$exlwtbc)
+biom_obese$exlwvbc = as.numeric(biom_obese$exlwvbc)
+```
+
+```{r warning=FALSE}
+drops <- c("abspid", "phdcmwbc", "phdcmhbc", "whtr")
+clrt_biom = biom_obese[ , !(names(biom_obese) %in% drops)]
+NA_percent =  clrt_biom %>% 
+   summarise_each(funs(100*mean(is.na(.)))) %>% 
+  gather() %>% 
+  filter(value<30)
+clrt_biom = clrt_biom[ , (names(clrt_biom) %in% NA_percent$key)]
+clrt_biom = clrt_biom %>% drop_na()
+for (i in 1:nrow(clrt_biom)){
+  if (clrt_biom$obesity[i] == "OBESE"){
+    clrt_biom$obesity[i] = 1
+  } else{
+    clrt_biom$obesity[i] = 0
+  }
+}
+clrt_biom$obesity = as.factor(clrt_biom$obesity)
+```
+
+```{r}
+CLTREE_biom=clrt_biom
+clrt_biom = CLTREE_biom %>% filter(sf2sa1qn == 1|sf2sa1qn == 2)
+```
+
+## CLT_biom
+```{r}
+set.seed(3888)
+res1 <- rpart(obesity~.,data=clrt_biom, 
+              parms = list(split="information"))
+```
+
+```{r}
+# rpart.plot(res1, 
+#            type=4,
+#            extra=1, 
+#            main="NCHS  data",
+#            cex=0.5)
+```
+
+```{r}
+set.seed(3888)
+rpart_cont <- rpart.control(cp = 0)
+res2 <- rpart(obesity~.,data=clrt_biom, 
+              control = rpart_cont,
+              parms = list(split="information"))
+```
+
+```{r}
+df <- data.frame(res2$cptable)
+ft <- flextable(df) %>%
+  autofit()
+ft
+
+kbl(df, caption = "Classification trees based on different complexity parameter (cp)") %>%
+  kable_classic(full_width = F) %>% 
+  row_spec(7, bold = TRUE, color='black') %>% 
+  add_footnote("Sample size (n) = 2767")
+```
+
+Use the `rpart.control` function to set the value of cp to zero. This brought us a full tree without performing any pruning using cp. We then refit the tree based on different cp. The one that returns smallest error is around 0.005.
+
+```{r}
+cpvals <- res2$cptable[,1]
+nsplit <- res2$cptable[,2]
+xerror <- res2$cptable[,4]
+minpos <- min(seq_along(xerror)[xerror == min(xerror)]) 
+```
+
+```{r}
+res3 <- prune.rpart(res2, cp = res2$cptable[7])
+# rpart.plot(res3,type=4,extra=1, main="NCHS  data",cex=0.55)
+```
+
+```{r}
+g <- vip(res3, num_features = 15) + theme_bw()
+df <- as.data.frame(g$data)
+ft <- flextable(df) %>% autofit()
+tree1 = as.data.frame(g$data)
+```
+
+```{r}
+for (i in 1:nrow(tree1)){
+  des = dic_full %>% filter(tolower(Variable) == tree1$Variable[i]) %>% drop_na(Description)
+  tree1$Indicator[i] = des$Description[1]
+}
+tree1 = tree1[,c(3,2,1)]
+tree1$Indicator[11] = "Ultra Processed Foods consumption"
+colnames(tree1)[1] = "Variable Description"
+
+kbl(tree1[,-3], align = "l",color = 'white', caption = "The first 15 important variables from classification trees based on the cp that returns smallest error") %>%
+  kable_classic(full_width = F) %>% 
+  row_spec(11, bold = TRUE,color = '#000000') %>% 
+    add_footnote("Sample size (n) = 2767") 
+```
+
+Variable improtance was extracted from the tree built on the cp which returns the smallest error.
+
+```{r}
+# caret cross validation results
+n_grid <- 100
+tuneGrid <- expand.grid(cp = seq(0.01, 0.001, length=n_grid))
+
+res4 <- train(
+  obesity ~ .,
+  data = clrt_biom,
+  method = "rpart",
+  trControl = trainControl(method = "repeatedcv", 
+                           number = 10,
+                           repeats = 10),
+  tuneGrid = tuneGrid)
+
+ggplot(res4) +
+  theme_bw()+
+  labs(caption = "Model accuracy given different cp")
+```
+
+10-fold cross validation was used to generate the accuracy figure above.
+
+```{r}
+df <- as.data.frame(res4$results)
+ft <- flextable(df) %>% autofit()
+```
+
+```{r}
+max_val <- which.max(res4$results$Accuracy)
+opt_cv  <- res4$results$cp[max_val]
+```
+
+```{r}
+res5 <- prune.rpart(res2, cp = opt_cv)
+# rpart.plot(res5,type=4,extra=1, main="NCHS  data",cex=0.55)
+```
+
+```{r}
+g <- vip(res5, num_features = 15) + theme_bw()
+df <- as.data.frame(g$data)
+ft <- flextable(df) %>% autofit()
+tree2 = g$data
+```
+
+```{r warning=FALSE}
+for (i in 1:nrow(tree2)){
+  des = dic_full %>% filter(tolower(Variable) == tree2$Variable[i]) %>% drop_na(Description)
+  tree2$Indicator[i] = des$Description[1]
+}
+tree2 = tree2[,c(3,2,1)]
+tree2$Indicator[11] = "Ultra Processed Foods consumption"
+colnames(tree2)[1] = "Variable Description"
+kbl(tree2[,-3], align = "l",color = 'white') %>%
+  kable_classic(full_width = F) %>% 
+  row_spec(11, bold = T,color = 'black') 
+
+tree_combine = cbind(tree1, tree2)
+colnames(tree_combine) = c("Variable Description (Model 1)", "Importance (Model 1)", "Deleted",
+                           "Variable Description (Model 2)", "Importance (Model 2)", "Deleted2")
+tree_combine = tree_combine %>% select(-c(Deleted2, Deleted))
+kbl(tree_combine, align = "l",color = 'white') %>%
+  kable_classic(full_width = F) %>% 
+  row_spec(11, bold = T,color = 'black') %>% 
+  add_footnote(c("Sample size (n) = 2767", 
+                 "Three variables that descripe ID, weight and height of the sample were removed",
+                 "Model 1: The model given by the complexity parameter that returns the smallest error.",
+                "Model 2: The model given by 10-fold cross validation"
+                )) 
+
+```
+
+Similarly, the variable importance was extracted from the model which was built on the cp suggested by 10-fold cross validation. And we put these importance tables together.
+
+## Random Forest
+
+```{r}
+# number of features
+n_features <- length(setdiff(names(clrt_biom), "obesity"))
+
+# train a default random forest model
+res6 <- ranger(
+  obesity ~ ., 
+  data = clrt_biom,
+  mtry = floor(n_features / 3),
+  respect.unordered.factors = "order",
+  seed = 123  
+)
+
+# get OOB error
+prediction_error <- res6$prediction.error
+```
+
+```{r}
+# create hyperparameter grid
+hyper_grid <- expand.grid(
+  mtry = floor(n_features * c(.05, .15, .25, .333, .4)),
+  min.node.size = c(1, 3, 5), 
+  replace = c(TRUE, FALSE),                               
+  sample.fraction = c(.5, .63, .8),                       
+  error = NA                                               
+)
+
+# execute full cartesian grid search
+for(i in seq_len(nrow(hyper_grid))) {
+  # fit model for ith hyperparameter combination
+  fit <- ranger(
+    formula         = obesity ~ ., 
+    data            = clrt_biom, 
+    num.trees       = n_features * 5,
+    mtry            = hyper_grid$mtry[i],
+    min.node.size   = hyper_grid$min.node.size[i],
+    replace         = hyper_grid$replace[i],
+    sample.fraction = hyper_grid$sample.fraction[i],
+    verbose         = FALSE,
+    seed            = 123,
+    respect.unordered.factors = 'order',
+  )
+  # export OOB error 
+  hyper_grid$error[i] <- fit$prediction.error
+}
+mean(hyper_grid$error)
+```
+
+A hyperparameter grid was firstly built. Followed by a full cartesian grid search, we got a total of 90 models and its corresponding error. The mean of error is then obtainable and used to see if random forests worked well.
+
+```{r}
+# re-run model with impurity-based variable importance
+rf_impurity <- ranger(
+  formula = obesity ~ ., 
+  data = clrt_biom, 
+  num.trees = 2000,
+  mtry = 12,
+  min.node.size = 5,
+  sample.fraction = .80,
+  replace = FALSE,
+  importance = "impurity",
+  respect.unordered.factors = "order",
+  verbose = FALSE,
+  seed  = 123
+)
+
+# re-run model with permutation-based variable importance
+rf_permutation <- ranger(
+  formula = obesity ~ ., 
+  data = clrt_biom, 
+  num.trees = 2000,
+  mtry = 12,
+  min.node.size = 5,
+  sample.fraction = .80,
+  replace = FALSE,
+  importance = "permutation",
+  respect.unordered.factors = "order",
+  verbose = FALSE,
+  seed  = 123
+)
+```
+
+
+```{r}
+p1 <- vip::vip(rf_impurity, num_features = 15, bar = FALSE) + theme_bw()
+p2 <- vip::vip(rf_permutation, num_features = 15, bar = FALSE) + theme_bw()
+
+df1 <- as.data.frame(p1$data)
+df1 <- flextable(df1) %>% autofit()
+
+df2 <- as.data.frame(p2$data)
+df2 <- flextable(df2) %>% autofit()
+tree3 = as.data.frame(p1$data)
+tree4 = as.data.frame(p2$data)
+# gridExtra::grid.arrange(df1, df2, nrow = 1)
+```
+
+```{r}
+for (i in 1:nrow(tree3)){
+  des = dic_full %>% filter(tolower(Variable) == tree3$Variable[i]) %>% drop_na(Description)
+  tree3$Indicator[i] = des$Description[1]
+}
+tree3 = tree3[,c(3,2,1)]
+tree3$Indicator[6] = "Ultra Processed Foods consumption"
+
+# kbl(tree3[,-3], align = "l",color = 'white',
+#     caption = "Table 1.2 The first 15 important variables from the model whose importance is impurity-based") %>%
+#   kable_classic(full_width = F) %>% 
+#   row_spec(6, bold = T,color = 'red') %>% 
+#   save_kable("Table1.2.png",zoom = 4)
+
+for (i in 1:nrow(tree4)){
+  des = dic_full %>% filter(tolower(Variable) == tree3$Variable[i]) %>% drop_na(Description)
+  tree4$Indicator[i] = des$Description[1]
+}
+tree4 = tree4[,c(3,2,1)]
+tree4$Indicator[6] = "Ultra Processed Foods consumption"
+
+tree_combine = cbind(tree3, tree4)
+colnames(tree_combine) = c("Variable Description (Model 1)", "Importance (Model 1)", "Deleted1",
+                           "Variable Description (Model 2)", "Importance (Model 2)", "Deleted2")
+tree_combine = tree_combine %>% select(-c(Deleted1, Deleted2))
+kbl(tree_combine, align = "l",color = 'white') %>%
+  kable_classic(full_width = F) %>% 
+  row_spec(6, bold = T,color = 'black') %>% 
+  add_footnote(c("Sample size (n) = 2767", 
+                 "Three variables that descripe ID, weight and height of the sample were removed",
+                 "Model 1: Impurity-based variable importance",
+                "Model 2: Permutation-based variable importance"
+                )) 
+```
+
+We reran the model The variable importance was then extracted as above. Note that the left one was impurity-based and the right one was permutation-based.
+
+# Log regression
+
+## 10-fold cv
+```{r}
+name_variable = c(tree1$Variable[1:rownames(tree1[match("ultra_processed",tree1$Variable),])],
+                  tree2$Variable[1:rownames(tree2[match("ultra_processed",tree2$Variable),])],
+                  tree3$Variable[1:rownames(tree3[match("ultra_processed",tree3$Variable),])], 
+                  tree4$Variable[1:rownames(tree4[match("ultra_processed",tree4$Variable),])]) %>% 
+  as.data.frame() %>% distinct()
+name_variable[nrow(name_variable)+1,] = "obesity"
+name_variable[nrow(name_variable)+2,] = "sf2sa1qn"
+new_log_set = CLTREE_biom [ , (names(CLTREE_biom) %in% name_variable$.)]
+new_log_set = new_log_set %>% filter(sf2sa1qn == 1|sf2sa1qn == 2)
+```
+
+```{r}
+df = new_log_set
+df <- df[ , c(1:13, 15, 14)]
+XX <- df[, 1:14]
+yy <- df[, 15]
+```
+
+```{r}
+cv_penLogistic1 <- function(yy, XX, method = c("vanilla",
+                                        "fowardAIC",
+                                          "forwardBIC",
+                                        "stepwiseAIC",
+                                        "stepwiseBIC",
+                                        "firth",
+                                        "ridge",
+                                        "lasso"),
+                           folds = 10,
+                           repeats = 10,
+                           seed = 1)
+{
+  set.seed(seed)
+  n <- nrow(XX)
+
+  error_mat <- matrix(NA, n, repeats)
+  dat <- data.frame(y = yy, X = XX)
+  for (r in 1:repeats) 
+  {
+    sets <- sample(rep(1:folds,n)[1:n],n)
+    for(i in 1:folds){
+      testSet  <- which(sets == i)
+      trainSet <- (1:n)[-testSet] 
+      testData    <- dat[testSet, ]
+      trainData   <- dat[trainSet, ]
+      
+      if (method == "vanilla") {
+        model       <- glm(y~.,family = binomial, data = trainData)
+      }
+      
+      if (method %in% c("fowardAIC", "forwardBIC", "stepwiseAIC", "stepwiseBIC")) 
+      {
+        null = glm(y~1,data = trainData, family = binomial)
+        full = glm(y~.,data = trainData, family = binomial)
+      }
+  
+      if (method == "fowardAIC") {
+        model <- step(null, scope = list(lower = null, upper = full), k = 2, trace = 0)
+      }
+      
+      if (method == "forwardBIC") {
+        model <- step(null, scope = list(lower = null, upper = full), k = log(n), trace = 0)
+      }     
+      
+      if (method == "stepwiseAIC") {
+        model <- step(full, k = 2, trace = 0)
+      }           
+      
+      if (method == "stepwiseBIC") {
+        model <- step(full, k = log(n), trace = 0)
+      }
+      
+      if (method == "ridge") {
+        vars_name_logset <- trainData %>% 
+          select(-y) %>% 
+          colnames() %>% 
+          str_c(collapse = "+") 
+        model_string <- paste("y  ~",vars_name_logset)
+        x_train <- model.matrix(as.formula(model_string), trainData)
+        model <- cv.glmnet(x=x_train,y = trainData$y, family = "binomial", alpha=0)          
+        # model <- cv.glmnet(data.matrix(trainData[, -1]), trainData$y, 
+        #                    alpha = 0, family = "binomial")
+      }
+      
+      if (method == "lasso") {
+        vars_name_logset <- trainData %>% 
+          select(-y) %>% 
+          colnames() %>% 
+          str_c(collapse = "+") 
+        model_string <- paste("y  ~",vars_name_logset)
+        x_train <- model.matrix(as.formula(model_string), trainData)
+        model <- cv.glmnet(x=x_train,y = trainData$y, family = "binomial", alpha=1)        
+        
+        # model <- cv.glmnet(data.matrix(trainData[, -1]), trainData$y, 
+        #                    alpha = 1, family = "binomial")
+      }
+      if (method == "lassolmin") {
+        vars_name_logset <- trainData %>% 
+          select(-y) %>% 
+          colnames() %>% 
+          str_c(collapse = "+") 
+        model_string <- paste("y  ~",vars_name_logset)
+        x_train <- model.matrix(as.formula(model_string), trainData)
+        model <- cv.glmnet(x=x_train,y = trainData$y, family = "binomial", alpha=1)
+
+        # model <- cv.glmnet(data.matrix(trainData[, -1]), trainData$y, 
+        #                    alpha = 1, family = "binomial")
+      }
+      
+      if (method == "firth") {
+        model <- brglm(y~., data=trainData)
+      }  
+      
+      if (method == "lassolmin"){
+         newX <- model.matrix(~.-y,data=testData)
+         res <- predict(model, newx = newX, s = "lambda.min")
+         testProb <- 1/(1 + exp(-res))
+      } else{
+      if (!(method %in% c("ridge", "lasso"))) {
+        testProb <- predict(model, testData, type = "response")
+      }
+    
+      if (method %in% c("ridge","lasso") ) {
+         newX <- model.matrix(~.-y,data=testData)
+         res <- predict(model, newx = newX, s = "lambda.1se")        
+        # res <- predict(model, newx = data.matrix(testData[,-1]), s = "lambda.1se")
+        testProb <- 1/(1 + exp(-res))
+      }}
+      
+      testPred <- round(testProb)
+      errs <- as.numeric(testData$y != testPred)
+      error_mat[testSet,r] <- errs
+    }
+  }
+  result <- list(error_mat, model)
+  return(result)
+}
+```
+
+```{r}
+# All results below in this chunck has been saved as Rdata to reduce the time of reproducing
+# repeats <- 10
+# res11 <- cv_penLogistic1(yy, XX, method = "vanilla", repeats = repeats)
+# res12 <- cv_penLogistic1(yy, XX, method = "fowardAIC", repeats = repeats)
+# res13 <- cv_penLogistic1(yy, XX, method = "forwardBIC", repeats = repeats)
+# res14 <- cv_penLogistic1(yy, XX, method = "stepwiseAIC", repeats = repeats)
+# res15 <- cv_penLogistic1(yy, XX, method = "stepwiseBIC", repeats = repeats)
+# res16 <- cv_penLogistic1(yy, XX, method = "ridge", repeats = repeats)
+# res17 <- cv_penLogistic1(yy, XX, method = "lasso", repeats = repeats)
+# res175 <- cv_penLogistic1(yy, XX, method = "lassolmin", repeats = repeats)
+# res18 <- cv_penLogistic1(yy, XX, method = "firth", repeats = repeats)
+load(here("data", "res11.Rdata"))
+load(here("data", "res12.Rdata"))
+load(here("data", "res13.Rdata"))
+load(here("data", "res14.Rdata"))
+load(here("data", "res15.Rdata"))
+load(here("data", "res16.Rdata"))
+load(here("data", "res17.Rdata"))
+load(here("data", "res175.Rdata"))
+load(here("data", "res18.Rdata"))
+```
+
+```{r}
+tab1 <- cbind(
+  apply(res11[[1]], 2, mean),
+  apply(res12[[1]], 2, mean),
+  apply(res13[[1]], 2, mean),
+  apply(res14[[1]], 2, mean),
+  apply(res15[[1]], 2, mean),
+  apply(res16[[1]], 2, mean),
+  apply(res17[[1]], 2, mean),
+  apply(res175[[1]], 2, mean),
+  apply(res18[[1]], 2, mean))
+
+colnames(tab1) <- c("Full",
+                   "Foward AIC",
+                   "Foward BIC",
+                   "Stepwise AIC",
+                   "StepwiseBIC",
+                   "Ridge",
+                   "Lasso.min",
+                   "Lasso.1se",
+                   "Firth")
+
+tab2 = tab1 %>% as.data.frame()
+tab2 = tab2 %>% gather()
+tab2$key[tab2$key == "StepwiseBIC"] <- "BackwardBIC"
+tab2$key[tab2$key == "Stepwise AIC"] <- "BackwardAIC"
+```
+
+```{r}
+ggplot()+
+  theme_economist_white()+
+  geom_boxplot(data = tab2,
+               aes(x=key,
+                   y=value)) +
+  labs(caption = "Mean error of each model obtained with 10 repeats.")+
+  theme(axis.title.y = element_blank(), 
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 10, angle = 40, vjust = 0.7),
+        plot.title = element_text(vjust=2, size = 20, hjust = 0.5),
+        plot.subtitle = element_text(size = 15, hjust = 0.5),
+        text = element_text(size=10),
+        plot.caption.position = "plot",
+        plot.caption = element_text(size =13, hjust = 0, face= "italic", vjust = -2.5, colour = "#787272"))
+ # ggsave(file="log.png", width=12, height=7, dpi=300)
+```
+
+The input list of logistic regression model is composed of significant variables suggested by classification trees and random forest. We firstly built these 8 models with penalties introduced as well in the last four models. 10-fold cross validation was performed and the mean error of each model was then plotted as above. This is the criteria for which model we should choose in this section. Either forward BIC or backward BIC is fine.
+
+## The best model
+```{r}
+new_log_set$obesity = as.character(new_log_set$obesity)
+new_log_set$obesity = as.integer(new_log_set$obesity)
+res <- glm(obesity~.,data=new_log_set,family=binomial)
+```
+
+```{r results = 'hide'}
+# Warning: This chuck of code takes 5-10 mins to run
+null = glm(obesity~1,data=new_log_set,family=binomial)
+full = glm(obesity~.,data=new_log_set,family=binomial)
+n = nrow(new_log_set)
+
+# stepwise from full model using BIC
+stepBICfull <- step(full,k=log(n))
+
+# stepwise from full model using AIC 
+stepAICfull <- step(full,k=2)
+
+# stepwise from null model using BIC 
+stepBICnull <- step(null,scope=list(lower=null,upper=full),k=log(n))
+
+# stepwise from null model using AIC 
+stepAICnull <- step(null,scope=list(lower=null,upper=full),k=2)
+```
+
+```{r}
+names(stepBICfull$coefficients) = c("Intercept", "BMI", "Age", "Measured weight", "Physical activity", "Sex")
+names(stepBICnull$coefficients) = c("Intercept", "BMI", "Age",  "Sex", "Measured weight", "Physical activity")
+tab_model(stepBICfull,  auto.label = FALSE)
+tab_model(stepBICnull,  auto.label = FALSE)
+```
+
+The model was then available. Forward BIC and backward BIC returned same model.
+
+# netural network
+```{r}
+temp_tree4 = tree4
+temp_tree4 = temp_tree4[,c(3,2,1)]
+temp_tree4$Indicator = "NA"
+temp_tree4 = temp_tree4[,c(3,2,1)]
+tree2 = as.data.frame(tree2)
+colnames(temp_tree4)[1] = "Variable Description"
+colnames(tree3)[1] = "Variable Description"
+tree1234 = rbind(tree1[1:which(tree1$Variable == "ultra_processed"),],
+       tree2[1:which(tree2$Variable == "ultra_processed"),],
+       tree3[1:which(tree3$Variable == "ultra_processed"),],
+      temp_tree4[1:which(temp_tree4$Variable == "ultra_processed"),]) %>% distinct(Variable)
+nnw_set = biom_obese[ , (names(biom_obese) %in% c(tree1234$Variable, "obesity", "sf2sa1qn"))] %>% drop_na()
+nnw_set = nnw_set %>% filter(sf2sa1qn == 1|sf2sa1qn ==2) %>% select(-sf2sa1qn)
+```
+
+```{r warning=FALSE}
+# map_chr(nnw_set_dummy,class)
+nnw_set_dummy = nnw_set
+nnw_set_dummy = data.frame(nnw_set[ , ! colnames(nnw_set) %in% "sex"],       # Create dummy data
+                           model.matrix( ~ sex - 1, nnw_set))
+
+nnw_set_dummy = data.frame(nnw_set_dummy[ , ! colnames(nnw_set_dummy) %in% "sabdyms"],       # Create dummy data
+                         model.matrix( ~ sabdyms - 1, nnw_set_dummy)) %>% select(-c(hcholbc,hypbc))
+# nnw_set_dummy = data.frame(nnw_set_dummy[ , ! colnames(nnw_set_dummy) %in% "incdec"],       # Create dummy data
+#                          model.matrix( ~ incdec - 1, nnw_set_dummy)) %>% select(-c(incdec98,incdec99,))
+nnw_set_dummy = nnw_set_dummy %>% as.tibble()
+nnw_set_dummy = nnw_set_dummy %>% select(obesity, everything())
+nnw_set_dummy = nnw_set_dummy %>% select(-c(incdec,sabdyms0,sabdyms4,sabdyms8,sabdyms9))
+nnw_set_dummy= nnw_set_dummy %>% mutate(
+  obesity = case_when(
+    obesity == "OBESE" ~ 1,
+    obesity == "NON-OBESE" ~0
+  )
+)
+nnw_set_dummy$obesity = as.factor(nnw_set_dummy$obesity)
+```
+
+```{r}
+mystd <- function(x) {
+  x <- (x-mean(x, na.rm=TRUE))/sd(x, na.rm=TRUE)
+}
+nnw_set_dummy_std <- nnw_set_dummy %>%
+  mutate_if(is.numeric, list(mystd))
+
+set.seed(20190426)
+tr_indx <- createDataPartition(nnw_set_dummy$obesity)$Resample1
+nnw_set_dummy_tr <- nnw_set_dummy_std[tr_indx,]
+nnw_set_dummy_ts <- nnw_set_dummy_std[-tr_indx,]
+```
+
+```{r}
+load(here("data", "neural.Rdata"))
+pred <- stats::predict(nnw_set_dummy_nn, nnw_set_dummy_ts)
+nnw_set_dummy_ts$pred <- ifelse(pred[,1] > 0.5, 1, 0)
+nnw_set_dummy_ts$pred_log = ifelse(nnw_set_dummy_ts$pred == nnw_set_dummy_ts$obesity, "TRUE", "FALSE")
+confusion_table = table(nnw_set_dummy_ts$obesity, nnw_set_dummy_ts$pred_log) 
+rownames(confusion_table) = c("NON-OBESE", "OBESE")
+
+kbl(confusion_table) %>% 
+  kable_classic(full_width = F) %>% 
+  add_footnote("Sample size (n) = 2892")
+```
+
+We fitted the neural network with only 1 hidden layer and 6 neurons. Half of the data was used as the test set and the other part was used to train the model. A threshold of 0.5 was selected and each value which was greater than 0.5 would be seen as 1 and 0 if otherwise. 1 represents obesity and 0 represents non-obesity. Then the prediction test was available. The confusion matrix above was established based on the prediction results.
+
+```{r}
+nnw_set_dummy_ts$predy <- pred[,1]
+```
+
+```{r}
+wgts1 <- nnw_set_dummy_nn$weights[[1]][[1]]
+rownames(wgts1) <- c("intercept", colnames(nnw_set_dummy_tr[,-1]))
+colnames(wgts1) <- paste0("s", 1:6)
+```
+
+```{r}
+wgts2 <- nnw_set_dummy_nn$weights[[1]][[2]]
+rownames(wgts2) <- c("intercept", paste0("s", 1:6))
+colnames(wgts2) <- c("NON-OBESE", "OBESE")
+```
+
+```{r}
+logit <- function(x) {
+  1/(1+exp(-x))
+}
+
+neurons <- as.matrix(nnw_set_dummy_tr[,-1])%*%wgts1[-1,] + rep(wgts1[1,], nrow(nnw_set_dummy_tr))
+neurons <- as_tibble(neurons) %>%
+  mutate_at(vars(contains("s")), logit) %>%
+ bind_cols(nnw_set_dummy_tr[,1]) %>% 
+  gather(neuron, prediction, -obesity)
+```
+
+```{r}
+wgts1_df <- as_tibble(wgts1[-1,]) %>%
+  mutate_all(., abs) %>%
+  mutate(var=rownames(wgts1[-1,])) %>%
+  gather(neuron, 
+         weight, 
+         -var)
+
+wgts1_df = wgts1_df %>% mutate(
+  var = case_when(
+    var == "bmisc"~ "BMI",
+    var == "agec"~"Age",
+    var == "phdkgwbc"~"Measured weight",
+    var == "exlwtbc"~"Physical activity",
+    var == "exlwvbc"~"Vigorous Physical activity",
+    var == "diastol"~"Diastolic blood pressure",
+    var == "systol"~"Systolic blood pressure",
+    var == "ultra_processed"~"UPF consumption",
+    var == "sex1"~"Male",
+    var == "sex2"~"Female",
+    var == "sabdyms1"~"Acceptable weight",
+    var == "sabdyms2"~"Underweight",
+    var == "sabdyms3"~"Overweight"
+  )
+)
+ggplot(wgts1_df, 
+       aes(x=var, 
+           y=weight)) + 
+  geom_col() + 
+  facet_wrap(~neuron, 
+             ncol=2, 
+             scales="free_x") + 
+  coord_flip()+
+  labs(
+    y = "Variable Importance",
+    caption = "Importance of each variable in each neuron"
+  )+
+  theme(
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 15),
+    strip.text = element_text(size = 15)
+  )
+
+```
+
+Followed by standardisation of our input variables, we divided the data into 2 samples, one of which would be used to train the data and the other one was used to test the model. Since all variables had been standardised, the weights in the neural network could be seen as the importance.
+
+```{r}
+wgts2_df <- as_tibble(wgts2[-1,]) %>%
+  mutate_all(., abs) %>%
+  mutate(var=rownames(wgts2[-1,])) %>%
+  gather(neuron, 
+         weight, 
+         -var)
+ggplot(wgts2_df, 
+       aes(x=var, 
+           y=weight)) + 
+  geom_col() + 
+  facet_wrap(~neuron, 
+             ncol=2, 
+             scales="free_x") + 
+  coord_flip() +
+  theme(
+    axis.title.y = element_blank(),
+    axis.title.x = element_blank()
+  )+
+  labs(caption = "Importance of hidden neurons")
+```
+
+Same as above, the weight of each neuron could be seen as the importance indicator since the values in the dataframe had all been standardised.
+
+# K-means clustering
+
+```{r}
+drops <- c("phdcmwbc", "phdcmhbc", "whtr")
+clrt_biom_knn = biom_obese[ , !(names(biom_obese) %in% drops)]
+NA_percent =  clrt_biom_knn %>% 
+   summarise_each(funs(100*mean(is.na(.)))) %>% 
+  gather() %>% 
+  filter(value<30)
+clrt_biom_knn = clrt_biom_knn[ , (names(clrt_biom_knn) %in% NA_percent$key)]
+clrt_biom_knn = clrt_biom_knn %>% drop_na()
+for (i in 1:nrow(clrt_biom_knn)){
+  if (clrt_biom_knn$obesity[i] == "OBESE"){
+    clrt_biom_knn$obesity[i] = 1
+  } else{
+    clrt_biom_knn$obesity[i] = 0
+  }
+}
+clrt_biom_knn$obesity = as.factor(clrt_biom_knn$obesity)
+```
+
+```{r}
+kcluster_biom=clrt_biom_knn
+kcluster_biom = kcluster_biom %>% select(bmisc, agec, phdkgwbc, sex, sabdyms,systol, diastol)
+kcluster_biom$sabdyms = as.character(kcluster_biom$sabdyms)
+kcluster_biom$sabdyms = as.factor(kcluster_biom$sabdyms)
+
+kcluster_biom = data.frame(kcluster_biom[ , ! colnames(kcluster_biom) %in% "sex"],       # Create dummy data
+                           model.matrix( ~ sex - 1, kcluster_biom))
+kcluster_biom = data.frame(kcluster_biom[ , ! colnames(kcluster_biom) %in% "sabdyms"],       # Create dummy data
+                           model.matrix( ~ sabdyms - 1, kcluster_biom))
+kcluster_biom = kcluster_biom %>% drop_na()
+scaled_set = kcluster_biom %>% scale()
+
+fviz_nbclust(scaled_set, kmeans, method = "silhouette", k.max = 24, linecolor = 'black') + 
+  labs(caption = "Sample size (n)  = 6929")+
+  theme(
+    plot.caption = element_text(face = "italic",
+                                hjust = -0.01)
+    )
+```
+
+Important variables in each model was selected to preform k-means clustering. The silhouette method suggested we would be better off choosing 5 clsuters.
+
+```{r }
+set.seed(123)
+km.res <- kmeans(scaled_set, 5, nstart = 25)
+kcluster_biom$"cluster"=km.res$cluster
+fviz_cluster(km.res, 
+  data = scaled_set,
+  palette = c("#2E9FDF", 
+              "#00AFBB", 
+              "grey", 
+              "#FC4E07",
+              "pink"), 
+  ellipse.type = "euclid",  
+  star.plot = TRUE, 
+  repel = TRUE, 
+  ggtheme = theme_minimal()
+)+labs(caption = "Visualisation of clusters")
+```
+
+We had standardised our input list and based on this, we visualized the clusters using `fviz_cluster`.
+
+```{r}
+new_group_cluster = tibble(clrt_biom_knn, kcluster_biom$cluster) 
+colnames(new_group_cluster)[ncol(new_group_cluster)] = "cluster"
+
+new_group_cluster = new_group_cluster%>% select(bmisc, agec, phdkgwbc, sex, exlwvbc, sabdyms, obesity,
+                            abspid, 
+                            sf2sa1qn, ultra_processed,
+                            cluster)
+kcluster_biom = new_group_cluster
+kcluster_biom = kcluster_biom %>% mutate(
+  new_ses = case_when(
+   sf2sa1qn %in% high_ses ~ "High SES",
+   sf2sa1qn %in% low_ses ~ "Low SES"
+  )
+)
+kcluster_biom = kcluster_biom %>% mutate(
+  new_obesity = case_when(
+   obesity == 1 ~ "OBESE",
+   obesity == 0 ~ "NON-OBESE"
+  )
+)
+```
+
+```{r}
+kcluster_biom %>% filter(new_ses == "Low SES") %>% 
+  ggplot(aes(x = ultra_processed, y=..scaled.., group = new_obesity, fill = new_obesity)) + 
+  geom_density(alpha = 0.5)+
+  facet_grid(. ~ cluster,
+              labeller = labeller(cluster = c("1" = "Cluster 1",
+                                  "2" = "Cluster 2",
+                                 "3" = "Cluster 3",
+                                  "4" = "Cluster 4",
+                                  "5" = "Cluster 5")))+
+  theme_economist_white()+
+  theme(panel.spacing = unit(2, "lines"))+
+  xlab("UPF Consumption")+
+  labs( title = "Density plot between UPF consumption and the number of obese people in low SES group",
+    caption = "Sample size (n) for each cluster is 550, 740, 674, 678, 125."
+  )+
+  theme(axis.title.y=element_blank(),
+        axis.title.x = element_text(vjust = -2),
+        axis.text.x = element_text(size = 10),
+        legend.title=element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        plot.caption.position = "plot",
+        plot.caption = element_text(hjust = 0, face= "italic", vjust = -3.5, colour = "#787272"))+
+  theme(panel.spacing = unit(2, "lines"))
+```
+
+Since 5 clusters were recommended, we then plot figures to see how the number of obese people would change when UPF consumption varies. Clusters generated before would be introduced as the new variable and figures above were plotted within low SES group.  
